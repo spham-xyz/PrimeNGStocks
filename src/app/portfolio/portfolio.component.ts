@@ -1,0 +1,193 @@
+import { Component, OnInit } from '@angular/core';
+import { FormBuilder, FormGroup, Validators } from '@angular/forms';
+import { HttpClient } from '@angular/common/http';
+import { Subject } from 'rxjs/Subject';
+import { Observable } from 'rxjs/Observable';
+import { debounceTime, distinctUntilChanged, filter, map, mergeMap, switchMap, tap } from 'rxjs/operators';
+import 'rxjs/add/observable/forkJoin';
+import 'rxjs/add/observable/combineLatest';
+
+import { FirestoreService } from '../shared/firestore.service';
+import { Stock } from '../shared/stock';
+import { FsStock } from '../shared/fs-stock';
+
+
+@Component({
+  selector: 'app-portfolio',
+  templateUrl: './portfolio.component.html',
+  styleUrls: ['./portfolio.component.css']
+})
+export class PortfolioComponent implements OnInit {
+  portForm: FormGroup;
+
+  displayDialog: boolean;
+  stock: Stock = {};
+  selectedStock: Stock;
+  newStock: boolean;
+
+  stocks: Stock[] = [];
+  cols: any[];
+
+  fsstock: FsStock;
+  fsstocks: FsStock[];
+
+  mySubject = new Subject();
+
+  constructor(private fb: FormBuilder, private http: HttpClient, private fs: FirestoreService) { }
+
+  ngOnInit() {
+    this.portForm = this.fb.group({
+      symbol: ['', Validators.required],
+      purchDate: ['', Validators.required],
+      purchPrice: ['', Validators.required]
+    });
+
+    // https://stackoverflow.com/questions/44593900/rxjs-one-observable-feeding-into-another
+    // https://stackoverflow.com/questions/39894691/how-to-chain-multiple-map-calls-on-previous-items-using-rxjs
+    // Need to use a pipe operator to invoke lettable operators
+    this.fs.getStocks$(x => x.orderBy('symbol', 'asc'))
+      .pipe(
+        // tap(data => console.log('FireStore', ' = ', JSON.stringify(data))),
+        // tap(data => this.symbols = data.map(row => row['symbol']).join(",")),
+        // map(data => { return data.map(row => row['symbol']).join(",") }),
+        mergeMap(data => {
+          const stocks$ = Observable.of(data);
+          const symbols$ = Observable.of(data.map(row => row['symbol']).join(","));
+          return Observable.forkJoin(stocks$, symbols$, (stocks, symbols) => {
+            return { stocks, symbols };
+          });
+        }),
+        mergeMap(data => {
+          this.fsstocks = data['stocks'];
+          const symbols = data['symbols'];
+          const url = `https://api.iextrading.com/1.0/stock/market/batch?symbols=${symbols}&types=quote&filter=symbol,companyName,latestPrice,latestTime`;
+          return this.http.get(url);
+        })
+      )
+      .subscribe(data => {
+        // Data stream updates on every event; need to reinitialize array 
+        this.stocks = [];
+        for (let key in data) {
+          this.stocks.push(data[key]['quote']);
+        }
+
+        // Merge arrays of objects.
+        this.stocks.forEach(s => {
+          this.fsstocks.forEach(f => {
+            f.symbol = f.symbol.toUpperCase();
+            if (s.symbol == f.symbol) { 
+              s['dollarChange'] = s.latestPrice - f.price;
+              s['percentChange'] = (s.latestPrice - f.price)/f.price;
+
+              Object.assign(s, f);
+            }
+          })
+        })
+
+        console.log('this.stocks', ' = ', JSON.stringify(this.stocks, null, 4))
+      })
+
+    this.cols = [
+      { field: 'id', header: 'Id', display: 'none' },
+      { field: 'symbol', header: 'Symbol', display: 'table-cell' },
+      { field: 'companyName', header: 'Company Name' },
+      { field: 'date', header: 'Purchase Date', align: 'center' },
+      { field: 'price', header: 'Purchase Price', align: 'right' },
+      { field: 'latestTime', header: 'Latest Time', align: 'center' },
+      { field: 'latestPrice', header: 'Latest Price', align: 'right' },
+
+      { field: 'dollarChange', header: '$ Change', align: 'right' },
+      { field: 'percentChange', header: '% Change', align: 'right' }
+    ];
+
+    // https://stackoverflow.com/questions/45073898/debounce-angular-2-with-ngmodelchange
+    // https://stackoverflow.com/questions/48044801/angular-observable-debouncetime
+    this.mySubject
+      .pipe(
+        debounceTime(2000),
+        distinctUntilChanged()
+      )
+      .subscribe(val => {
+        console.log('debounceTime', ' = ', val);
+        this.stock.date = val;
+      });
+
+  }
+
+  onDateChange(event: Observable<string>, id: string) {
+    // console.log('before', ' = ', JSON.stringify(this.stock));
+    // this.stock.date = event;
+    // console.log('after', ' = ', JSON.stringify(this.stock));
+    this.mySubject.next(event);
+  }
+
+  onSubmit(form: FormGroup) {
+    console.log('Valid?', form.valid);
+    console.log('Name', form.value.name);
+    console.log('Email', form.value.email);
+    console.log('Message', form.value.message);
+  }
+
+  showDialogToAdd() {
+    this.newStock = true;
+    this.stock = {};
+    this.displayDialog = true;
+  }
+
+  save() {
+    let stocks = [...this.stocks];
+    let fsstock = {
+      // id: this.stock.id,     // New document: id autogenerated
+      symbol: this.stock.symbol.toUpperCase(),
+      date: this.stock.date,
+      price: this.stock.price
+    };
+
+    if (this.newStock) {
+      stocks.push(this.stock);
+      // Add to FireStore
+      this.fs.addStock(fsstock);      
+
+    } else {
+      stocks[this.stocks.indexOf(this.selectedStock)] = this.stock;
+      //Update FireStore
+      this.fs.updateStock(this.stock.id, fsstock);
+    }
+
+    this.stocks = stocks;
+    this.stock = null;
+    this.displayDialog = false;
+  }
+
+  delete() {
+    let index = this.stocks.indexOf(this.selectedStock);
+    this.stocks = this.stocks.filter((val, i) => i != index);
+    this.stock = null;
+    this.displayDialog = false;
+    // Delete from FireStore
+    this.fs.deleteStock(this.selectedStock.id);
+  }
+
+  onRowSelect(event) {
+    console.log(JSON.stringify(event, null, 2))
+    this.newStock = false;
+    this.stock = this.cloneStock(event.data);
+    this.displayDialog = true;
+  }
+
+  cloneStock(s: Stock): Stock {
+    /*
+    let stock = {};
+    for (let prop in s) {
+      stock[prop] = s[prop];
+    }
+    return stock;
+    */
+
+    //return JSON.parse(JSON.stringify(s));     /* Deep copies */
+    //return Object.assign({}, s);              /* Shallow copies */
+    return { ...s }
+  }
+
+
+}

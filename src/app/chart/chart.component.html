@@ -1,0 +1,8 @@
+<p-panel header="Stock Price" class="ui-g-12 ui-md-10">
+  <p-dropdown #sym [options]="symbols" [(ngModel)]="selectedSymbol" placeholder="Select stock" [style]="{'width':'150px'}" (onChange)="drawChart(sym.value, inr.value)">
+  </p-dropdown>
+  &nbsp;&nbsp;
+  <p-dropdown #inr [options]="intervals" [(ngModel)]="selectedInterval" placeholder="Select interval" (onChange)="drawChart(sym.value, inr.value)">
+  </p-dropdown>
+  <p-chart type="line" [data]="data"></p-chart>
+</p-panel>
